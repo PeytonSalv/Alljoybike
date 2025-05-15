@@ -1,3 +1,4 @@
+// src/lib/fetchCollectionProducts.ts
 import { booqable } from './booqable';
 
 export type Product = {
@@ -6,108 +7,140 @@ export type Product = {
   name: string;
   description: string;
   image: string;
-  price: string;
+  price: string;          // will be overwritten for bundles if dynamic price succeeds
   bundleId?: string;
 };
 
-// A simple cache: key is `${collectionId}-${start}-${end}`
-const productsCache = new Map<string, Product[]>();
+// simple in-memory cache keyed by `${collectionId}-${start}-${end}`
+const cache = new Map<string, Product[]>();
 
-/**
- * Clears the entire cache (or you could expose a function to clear just one key)
- */
 export function clearProductsCache() {
-  productsCache.clear();
+  cache.clear();
 }
 
-/**
- * Fetches all pages of collection_items, with caching.
- * @param collectionId The Booqable collection to fetch
- * @param start ISO timestamp string of rental start
- * @param end   ISO timestamp string of rental end
- */
+// Booqable wants dates like "YYYY-MM-DD HH:MM:SS UTC"
+function formatDateForBooqable(iso: string): string {
+  const d = new Date(iso);
+  const Y = d.getUTCFullYear();
+  const M = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const D = String(d.getUTCDate()).padStart(2, '0');
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  const m = String(d.getUTCMinutes()).padStart(2, '0');
+  const s = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${Y}-${M}-${D} ${h}:${m}:${s} UTC`;
+}
+
+// If no dates provided, default to tomorrow → day after
+function getDefaultRange() {
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  return {
+    start: new Date(now + oneDay).toISOString(),
+    end:   new Date(now + 2 * oneDay).toISOString(),
+  };
+}
+
 export async function fetchCollectionProducts(
   collectionId: string,
-  start: string,
-  end: string
+  start?: string,
+  end?: string
 ): Promise<Product[]> {
   if (!collectionId) return [];
 
-  // build our cache key
-  const cacheKey = `${collectionId}-${start}-${end}`;
+  // 1) resolve or default dates
+  const { start: ds, end: de } = getDefaultRange();
+  const startIso = start ?? ds;
+  const endIso   = end   ?? de;
+  const key      = `${collectionId}-${startIso}-${endIso}`;
+  if (cache.has(key)) return cache.get(key)!;
 
-  // if we’ve already fetched, return cached and log
-  if (productsCache.has(cacheKey)) {
-    console.log(
-      'okay I have fetched all the prices. no need to ask anymore'
-    );
-    return productsCache.get(cacheKey)!;
-  }
-
-  // else, do the real fetch
-  const pageSize = 100;
-  let page = 1;
+  // 2) paginate collection_items
   const out: Product[] = [];
-
-  for (;;) {
-    const { data } = await booqable.get('/collection_items', {
+  let page = 1;
+  const pageSize = 100;
+  while (true) {
+    const resp = await booqable.get('/collection_items', {
       params: {
         'filter[collection_id]': collectionId,
         'page[size]': pageSize,
         'page[number]': page,
         include: 'item.photo',
-        // optionally pass your date params here if needed by your API,
-        // e.g. start_date: start, end_date: end
       },
     });
+    const items    = resp.data.data    || [];
+    const included = resp.data.included || [];
+    const byId     = Object.fromEntries(included.map((i: any) => [i.id, i]));
 
-    const items = data?.data ?? [];
-    const included = data?.included ?? [];
-    const byId: Record<string, any> = {};
-    included.forEach((r: any) => (byId[r.id] = r));
-
-    const photoUrl = (itemRec: any): string => {
-      if (itemRec.attributes?.photo_url) return itemRec.attributes.photo_url;
-      const img = itemRec.attributes?.images?.[0];
-      if (img?.large_url || img?.original_url)
-        return img.large_url ?? img.original_url;
-      const rel = itemRec.relationships?.photo?.data;
+    const photoUrl = (rec: any) => {
+      if (rec.attributes.photo_url) return rec.attributes.photo_url;
+      const img = rec.attributes.images?.[0];
+      if (img?.large_url || img?.original_url) return img.large_url ?? img.original_url;
+      const rel = rec.relationships?.photo?.data;
       if (rel) {
-        const photo = byId[rel.id];
-        if (photo?.attributes?.large_url || photo?.attributes?.original_url)
-          return photo.attributes.large_url ?? photo.attributes.original_url;
+        const p = byId[rel.id];
+        return p?.attributes?.large_url ?? p?.attributes?.original_url ?? '';
       }
-      return 'https://dummyimage.com/600x400/cccccc/ffffff&text=No+Photo';
+      return '';
     };
 
-    items.forEach((ci: any) => {
-      const itemRef = ci.relationships.item.data;
-      const itemRec = byId[itemRef.id];
-      if (!itemRec) return;
-      const attributes = itemRec.attributes;
-      const isBundle = attributes?.product_type === 'bundle';
+    for (const ci of items) {
+      const { id, type } = ci.relationships.item.data;
+      const rec = byId[id];
+      if (!rec) continue;
+      const attrs    = rec.attributes;
+      const isBundle = attrs.product_type === 'bundle';
 
       out.push({
-        id: itemRef.id,
-        type: isBundle ? 'bundle' : itemRef.type,
-        name: attributes.name,
-        description: attributes.description,
-        image: photoUrl(itemRec),
-        price: attributes.price_formatted ?? '$0',
-        bundleId: isBundle ? itemRef.id : undefined,
+        id,
+        type:        isBundle ? 'bundle' : type,
+        name:        attrs.name,
+        description: attrs.description,
+        image:       photoUrl(rec),
+        price:       attrs.price_formatted ?? '$0', // default
+        bundleId:    isBundle ? id : undefined,
       });
-    });
+    }
 
     if (items.length < pageSize) break;
-    page += 1;
+    page++;
   }
 
-  // cache it, and log success
-  productsCache.set(cacheKey, out);
-  console.log(
-    'Fetched all prices for',
-    cacheKey,
-    '-- okay I have fetched all the prices. no need to ask anymore'
-  );
+  // 3) collect bundle IDs
+  const bundleIds = out.filter((p) => p.type === 'bundle').map((b) => b.id);
+  if (bundleIds.length > 0) {
+    // map to hold any successful dynamic prices
+    const priceMap: Record<string, string> = {};
+    const chunkSize = 5;
+
+    for (let i = 0; i < bundleIds.length; i += chunkSize) {
+      const chunk = bundleIds.slice(i, i + chunkSize);
+      const params = new URLSearchParams();
+      params.append('filter[from]', formatDateForBooqable(startIso));
+      params.append('filter[till]', formatDateForBooqable(endIso));
+      chunk.forEach((id) => params.append('filter[item_id][]', id));
+      params.append('include', 'item');
+
+      try {
+        const pr = await booqable.get(`/item_prices?${params.toString()}`);
+        for (const ip of pr.data.data) {
+          const id = ip.attributes.item_id;
+          const c  = ip.attributes.price_each_in_cents;
+          priceMap[id] = `$${(c / 100).toFixed(2)}`;
+        }
+      } catch (err: any) {
+        console.error('[ITEM_PRICES_CHUNK_ERROR]', chunk, err.response?.data || err.message);
+        // continue to next chunk, leave these bundles at default price
+      }
+    }
+
+    // overwrite any that succeeded
+    out.forEach((p) => {
+      if (p.bundleId && priceMap[p.bundleId]) {
+        p.price = priceMap[p.bundleId];
+      }
+    });
+  }
+
+  cache.set(key, out);
   return out;
 }

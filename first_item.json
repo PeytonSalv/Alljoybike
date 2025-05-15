@@ -1,0 +1,20 @@
+{
+  "id": "96e63080-bd45-4713-a741-19f4344844b4",
+  "type": "collection_items",
+  "attributes": {
+    "created_at": "2024-11-24T00:55:48.967938+00:00",
+    "updated_at": "2024-11-26T01:53:21.358945+00:00",
+    "item_id": "8930a8d5-6f62-4da7-a2dc-63ea0a6e1a76",
+    "collection_id": "ec426417-a428-4d81-be7b-08ef35b2c9d5",
+    "position": 1,
+    "implicit": false
+  },
+  "relationships": {
+    "item": {
+      "data": {
+        "type": "bundles",
+        "id": "8930a8d5-6f62-4da7-a2dc-63ea0a6e1a76"
+      }
+    }
+  }
+}

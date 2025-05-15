@@ -13,7 +13,8 @@ export default async function LocationPage(
 
   if (!location) return notFound();
 
-  const products = await fetchCollectionProducts(location.collection ?? '');
+  const products = await fetchCollectionProducts(location.collectionID);
+
 
   return (
     <>
